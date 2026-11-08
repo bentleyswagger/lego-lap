@@ -1,0 +1,1317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lego Lap</title>
+<style>
+  :root {
+    --page: #e9eef5;
+    --ink: #1b2a41;
+    --muted: #4a5b73;
+    --frame: #1b2a41;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --page: #12161d;
+      --ink: #e8edf5;
+      --muted: #9aa8bd;
+      --frame: #e8edf5;
+    }
+  }
+  :root[data-theme="dark"] {
+    --page: #12161d;
+    --ink: #e8edf5;
+    --muted: #9aa8bd;
+    --frame: #e8edf5;
+  }
+  *, *::before, *::after { box-sizing: inherit; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--ink);
+    font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px 16px 28px;
+    min-height: 100vh;
+  }
+  h1 {
+    margin: 0 0 4px;
+    font-size: 2rem;
+    letter-spacing: 0.01em;
+  }
+  p.hint {
+    margin: 0 0 16px;
+    color: var(--muted);
+    max-width: 60ch;
+    text-align: center;
+  }
+  canvas {
+    width: 100%;
+    max-width: 960px;
+    height: auto;
+    aspect-ratio: 960 / 600;
+    border: 4px solid var(--frame);
+    border-radius: 6px;
+    display: block;
+  }
+  kbd {
+    font: inherit;
+    font-weight: 700;
+    border: 2px solid var(--muted);
+    border-radius: 4px;
+    padding: 0 5px;
+  }
+</style>
+</head>
+<body>
+  <h1>Lego Lap</h1>
+  <p class="hint">Drive with the <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> arrow keys or <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd>. Milestone 7: pick a track and a car with ← → and Space, then race 3 laps and dodge the bricks. Press M to mute.</p>
+  <canvas id="game" width="960" height="600"></canvas>
+
+<script>
+// ============================================================
+//  LEGO LAP - Milestone 1: drive a car
+//  Everything you might want to tweak is in the two blocks
+//  below. Change a number, save, refresh, and drive again!
+// ============================================================
+
+// How the car feels. "Easy and forgiving" is the goal.
+const CONFIG = {
+  maxSpeed: 220,      // top forward speed (bigger = faster)
+  reverseSpeed: 80,   // top backward speed
+  accel: 180,         // how quickly the gas pedal builds speed
+  brakePower: 420,    // how hard the brake stops you
+  reverseAccel: 160,  // how quickly you speed up in reverse
+  coastDrag: 140,     // how quickly you slow down with no keys pressed
+  turnRate: 2.6,      // how sharply the car steers (bigger = tighter turns)
+  gripSpeed: 60,      // below this speed the car turns less (no spinning in place)
+  wallBounce: 0.55,   // how much speed you keep after bumping a wall
+  wallMargin: 30,     // how close to the edge the car can get
+  offTrackMaxSpeed: 90, // top speed on the grass
+  offTrackDrag: 220,    // how quickly the grass slows you down
+  curbForgiveness: 10,  // the red and white edge still counts as track
+  totalLaps: 3,         // how many laps in a race
+  checkpointRadius: 135, // how close you must pass each invisible checkpoint
+  brickHitRadius: 30,    // how close the car must get to smash a brick
+  brickSlowdown: 0.65    // speed kept after a hit (1 = no slowdown, 0 = full stop)
+};
+
+// All the colors live here so Bentley can pick a theme later.
+const THEME = {
+  baseplate: "#2f9e44",
+  studLight: "#4cc15f",
+  studDark: "#23803a",
+  carBody: "#d01012",
+  carRoof: "#ee3b3d",
+  carWindow: "#a9d8ff",
+  carWheel: "#1a1a1a",
+  carLight: "#ffe14d",
+  hudText: "#ffffff",
+  hudBar: "#ffe14d",
+  hudBarBack: "rgba(0, 0, 0, 0.35)",
+  road: "#5b6470",
+  roadLine: "#f4f4f4",
+  curbA: "#ffffff",
+  curbB: "#d01012",
+  brickColors: ["#1c6fd1", "#ffd400", "#ff7f1e", "#f4f4f4"],
+  brickEdge: "rgba(0, 0, 0, 0.25)"
+};
+
+// ------------------------------------------------------------
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = canvas.width;
+const H = canvas.height;
+
+// Draw the studded baseplate onto its own canvas, then reuse it every frame.
+// It gets repainted whenever you switch tracks.
+const baseplate = document.createElement("canvas");
+baseplate.width = W;
+baseplate.height = H;
+
+function paintBaseplate() {
+  const b = baseplate.getContext("2d");
+  b.fillStyle = THEME.baseplate;
+  b.fillRect(0, 0, W, H);
+  const step = 40;
+  for (let y = step / 2; y < H; y += step) {
+    for (let x = step / 2; x < W; x += step) {
+      b.fillStyle = THEME.studDark;
+      b.beginPath();
+      b.arc(x, y + 2, 11, 0, Math.PI * 2);
+      b.fill();
+      b.fillStyle = THEME.studLight;
+      b.beginPath();
+      b.arc(x, y, 11, 0, Math.PI * 2);
+      b.fill();
+    }
+  }
+}
+
+// ---- Tracks ----
+// A track is a closed loop of points. A car counts as "on the track" while
+// it is within half the track width of the line through them.
+// Bentley can design new tracks by adding to the TRACKS list below!
+
+// Turn a handful of control points into a smooth loop of evenly spaced points
+function buildLoop(control, spacing) {
+  const n = control.length;
+  const dense = [];
+  for (let i = 0; i < n; i++) {
+    const p0 = control[(i - 1 + n) % n];
+    const p1 = control[i];
+    const p2 = control[(i + 1) % n];
+    const p3 = control[(i + 2) % n];
+    for (let s = 0; s < 40; s++) {
+      const t = s / 40;
+      const t2 = t * t;
+      const t3 = t2 * t;
+      const curve = (k) => 0.5 * (2 * p1[k] + (-p0[k] + p2[k]) * t +
+        (2 * p0[k] - 5 * p1[k] + 4 * p2[k] - p3[k]) * t2 +
+        (-p0[k] + 3 * p1[k] - 3 * p2[k] + p3[k]) * t3);
+      dense.push({ x: curve(0), y: curve(1) });
+    }
+  }
+
+  // Measure the loop, then drop points at equal distances along it
+  const lengths = dense.map((p, i) => {
+    const q = dense[(i + 1) % dense.length];
+    return Math.hypot(q.x - p.x, q.y - p.y);
+  });
+  const total = lengths.reduce((sum, len) => sum + len, 0);
+  const count = Math.round(total / spacing);
+  const step = total / count;
+  const points = [];
+  let j = 0;
+  let covered = 0;
+  for (let k = 0; k < count; k++) {
+    const target = k * step;
+    while (covered + lengths[j] < target) {
+      covered += lengths[j];
+      j++;
+    }
+    const f = (target - covered) / lengths[j];
+    const a = dense[j];
+    const b = dense[(j + 1) % dense.length];
+    points.push({ x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f });
+  }
+  return points;
+}
+
+// Build a track from control points. Bricks are [how far around the lap
+// (0 to 1) after the start line, how far left/right of the middle].
+// The three checkpoints are spread evenly around the lap.
+function makeLoopTrack(def) {
+  const points = buildLoop(def.control, 13);
+  const n = points.length;
+  const start = def.startIndex;
+  return {
+    name: def.name,
+    description: def.description,
+    width: def.width,
+    startIndex: start,
+    checkpoints: [1, 2, 3].map((k) => (start + Math.round((n * k) / 4)) % n),
+    bricks: def.bricks.map(([lap, offset]) => [(start + Math.round(n * lap)) % n, offset]),
+    points
+  };
+}
+
+const TRACKS = [
+  {
+    name: "Brick Oval",
+    description: "Smooth and easy",
+    width: 170,
+    startIndex: 105,
+    // Checkpoints: point numbers the car must pass, in order, every lap
+    checkpoints: [0, 35, 70],
+    // Loose bricks: [point number along the track, how far left/right of the middle]
+    bricks: [
+      [8, -45], [18, 40], [28, -25], [38, 50], [50, -45],
+      [62, 35], [74, -40], [86, 45], [118, -35], [130, 30]
+    ],
+    points: (function () {
+      const pts = [];
+      const count = 140;
+      for (let i = 0; i < count; i++) {
+        const t = (i / count) * Math.PI * 2;
+        pts.push({ x: W / 2 + 360 * Math.cos(t), y: H / 2 + 190 * Math.sin(t) });
+      }
+      return pts;
+    })()
+  },
+  makeLoopTrack({
+    name: "Bean Bend",
+    description: "One gentle dip to steer around",
+    width: 150,
+    startIndex: 15,
+    control: [
+      [301, 124], [473, 114], [677, 125], [803, 184], [851, 296], [790, 426],
+      [679, 457], [554, 399], [468, 393], [368, 445], [231, 474], [124, 402],
+      [97, 252], [167, 157]
+    ],
+    bricks: [
+      [0.06, -40], [0.14, 35], [0.23, -30], [0.31, 45], [0.40, -42],
+      [0.49, 30], [0.58, -45], [0.67, 38], [0.77, -35], [0.87, 42]
+    ]
+  }),
+  makeLoopTrack({
+    name: "Dog Bone",
+    description: "Two round ends, one narrow middle",
+    width: 150,
+    startIndex: 13,
+    control: [
+      [263, 126], [404, 162], [483, 185], [554, 178], [712, 139], [820, 187],
+      [859, 298], [803, 421], [696, 464], [561, 425], [485, 410], [405, 425],
+      [251, 470], [147, 424], [102, 302], [156, 173]
+    ],
+    bricks: [
+      [0.06, 38], [0.14, -42], [0.23, 30], [0.31, -45], [0.40, 40],
+      [0.49, -30], [0.58, 45], [0.67, -38], [0.77, 35], [0.87, -42]
+    ]
+  })
+];
+
+let trackChoice = 0;        // which track is loaded (a number into TRACKS)
+let TRACK = TRACKS[0];
+let finishPoint;            // where the finish line is
+let finishAngle;
+let finishTx;
+let finishTy;
+
+// Checkpoints are spots around the track (by point number) that the car
+// must pass, in order, before crossing the finish line counts as a lap.
+// This stops anyone from reversing over the line to cheat.
+let CHECKPOINTS = TRACK.checkpoints;
+
+// The car starts a little way behind the finish line.
+const GRID_BACK = 4;
+
+// Paint the road onto the baseplate: red and white curb, gray road,
+// and a dashed center line.
+function paintTrack() {
+  const b = baseplate.getContext("2d");
+  const path = new Path2D();
+  TRACK.points.forEach((p, i) => {
+    if (i === 0) path.moveTo(p.x, p.y);
+    else path.lineTo(p.x, p.y);
+  });
+  path.closePath();
+  b.lineJoin = "round";
+
+  b.lineWidth = TRACK.width + 24;
+  b.strokeStyle = THEME.curbA;
+  b.stroke(path);
+  b.setLineDash([26, 26]);
+  b.strokeStyle = THEME.curbB;
+  b.stroke(path);
+  b.setLineDash([]);
+
+  b.lineWidth = TRACK.width;
+  b.strokeStyle = THEME.road;
+  b.stroke(path);
+
+  b.lineWidth = 4;
+  b.strokeStyle = THEME.roadLine;
+  b.setLineDash([22, 22]);
+  b.stroke(path);
+  b.setLineDash([]);
+}
+
+// How far a spot is from the middle of the track
+function distanceToTrack(px, py) {
+  const pts = TRACK.points;
+  let best = Infinity;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % pts.length];
+    const abx = b.x - a.x;
+    const aby = b.y - a.y;
+    const t = Math.max(0, Math.min(1,
+      ((px - a.x) * abx + (py - a.y) * aby) / (abx * abx + aby * aby)));
+    const dx = px - (a.x + abx * t);
+    const dy = py - (a.y + aby * t);
+    best = Math.min(best, dx * dx + dy * dy);
+  }
+  return Math.sqrt(best);
+}
+
+// Paint a checkered finish line onto the baseplate.
+function paintFinishLine() {
+  const b = baseplate.getContext("2d");
+  const size = 10;
+  const rows = Math.ceil(TRACK.width / size);
+  b.save();
+  b.translate(finishPoint.x, finishPoint.y);
+  b.rotate(finishAngle);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < 2; c++) {
+      b.fillStyle = (r + c) % 2 === 0 ? "#ffffff" : "#1a1a1a";
+      b.fillRect((c - 1) * size, -TRACK.width / 2 + r * size, size, size);
+    }
+  }
+  b.restore();
+}
+
+// Switch to a track: find the finish line, then repaint the whole baseplate.
+function loadTrack(index) {
+  trackChoice = index;
+  TRACK = TRACKS[index];
+  const n = TRACK.points.length;
+  const start = TRACK.startIndex;
+  const before = TRACK.points[(start - 1 + n) % n];
+  const after = TRACK.points[(start + 1) % n];
+  finishPoint = TRACK.points[start];
+  finishAngle = Math.atan2(after.y - before.y, after.x - before.x);
+  finishTx = Math.cos(finishAngle);
+  finishTy = Math.sin(finishAngle);
+  CHECKPOINTS = TRACK.checkpoints;
+  paintBaseplate();
+  paintTrack();
+  paintFinishLine();
+}
+loadTrack(0);
+
+// The car. Angle 0 means it points to the right.
+const car = { x: 0, y: 0, angle: 0, speed: 0, onTrack: true, choice: 0 };
+
+// The race goes: ready -> countdown -> racing -> finished
+const race = {
+  state: "ready",
+  countdown: 0,
+  time: 0,
+  lapStart: 0,
+  lapTimes: [],
+  nextCheckpoint: 0,
+  prevAlong: -40,
+  goFlash: 0,
+  missedFlash: 0,
+  crossedStart: false,
+  lastTick: 3,
+  finishChoice: 0
+};
+
+// Where the car is compared with the finish line:
+// along = ahead of (+) or behind (-) the line, across = how far left or right.
+function finishOffsets() {
+  const rx = car.x - finishPoint.x;
+  const ry = car.y - finishPoint.y;
+  return {
+    along: rx * finishTx + ry * finishTy,
+    across: -rx * finishTy + ry * finishTx
+  };
+}
+
+// Put the car on the start grid and get ready for a new race.
+function resetRace() {
+  const a = TRACK.points[TRACK.startIndex - GRID_BACK];
+  const b = TRACK.points[TRACK.startIndex - GRID_BACK + 1];
+  car.x = a.x;
+  car.y = a.y;
+  car.angle = Math.atan2(b.y - a.y, b.x - a.x);
+  car.speed = 0;
+  car.onTrack = true;
+  race.state = "ready";
+  race.countdown = 0;
+  race.time = 0;
+  race.lapStart = 0;
+  race.lapTimes = [];
+  race.nextCheckpoint = 0;
+  resetBricks();
+  race.goFlash = 0;
+  race.missedFlash = 0;
+  race.finishChoice = 0;
+  race.crossedStart = false;
+  race.prevAlong = finishOffsets().along;
+}
+
+// Loose bricks on the road, plus the little pieces that fly when one is hit.
+const bricks = [];
+const debris = [];
+
+function resetBricks() {
+  bricks.length = 0;
+  debris.length = 0;
+  const count = TRACK.points.length;
+  TRACK.bricks.forEach(([index, offset], n) => {
+    const p = TRACK.points[index];
+    const before = TRACK.points[(index - 1 + count) % count];
+    const after = TRACK.points[(index + 1) % count];
+    const tangent = Math.atan2(after.y - before.y, after.x - before.x);
+    bricks.push({
+      x: p.x - Math.sin(tangent) * offset,
+      y: p.y + Math.cos(tangent) * offset,
+      angle: tangent + (((n * 37) % 11) - 5) * 0.15, // a little crooked, always the same
+      color: THEME.brickColors[n % THEME.brickColors.length],
+      hit: false
+    });
+  });
+}
+
+function smashBrick(brick) {
+  brick.hit = true;
+  SOUNDS.brick();
+  for (let i = 0; i < 8; i++) {
+    const dir = Math.random() * Math.PI * 2;
+    const power = 60 + Math.random() * 120;
+    debris.push({
+      x: brick.x,
+      y: brick.y,
+      vx: Math.cos(dir) * power + Math.cos(car.angle) * car.speed * 0.4,
+      vy: Math.sin(dir) * power + Math.sin(car.angle) * car.speed * 0.4,
+      angle: Math.random() * Math.PI,
+      spin: (Math.random() - 0.5) * 12,
+      life: 1.2,
+      color: brick.color
+    });
+  }
+}
+
+function updateBricks(dt) {
+  bricks.forEach((brick) => {
+    if (brick.hit) return;
+    if (Math.hypot(car.x - brick.x, car.y - brick.y) < CONFIG.brickHitRadius) {
+      smashBrick(brick);
+      car.speed *= CONFIG.brickSlowdown;
+    }
+  });
+  for (let i = debris.length - 1; i >= 0; i--) {
+    const d = debris[i];
+    d.x += d.vx * dt;
+    d.y += d.vy * dt;
+    d.vx *= Math.pow(0.05, dt);
+    d.vy *= Math.pow(0.05, dt);
+    d.angle += d.spin * dt;
+    d.life -= dt;
+    if (d.life <= 0) debris.splice(i, 1);
+  }
+}
+
+function drawBricks() {
+  bricks.forEach((brick) => {
+    if (brick.hit) return;
+    ctx.save();
+    ctx.translate(brick.x, brick.y);
+    ctx.rotate(brick.angle);
+    rect(-17, -7, 36, 20, "rgba(0, 0, 0, 0.25)", 3);
+    rect(-18, -10, 36, 20, brick.color, 3);
+    [-8, 8].forEach((sx) => {
+      ctx.fillStyle = THEME.brickEdge;
+      ctx.beginPath();
+      ctx.arc(sx, 1, 5.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = brick.color;
+      ctx.beginPath();
+      ctx.arc(sx, 0, 5.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.5)";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    });
+    ctx.restore();
+  });
+}
+
+function drawDebris() {
+  debris.forEach((d) => {
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, Math.min(1, d.life / 0.5));
+    ctx.translate(d.x, d.y);
+    ctx.rotate(d.angle);
+    rect(-6, -6, 12, 12, d.color, 2);
+    ctx.fillStyle = "rgba(255, 255, 255, 0.45)";
+    ctx.beginPath();
+    ctx.arc(0, 0, 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  });
+}
+
+// ---- Sound effects ----
+// All sounds are made in code with the browser's Web Audio, so there are
+// no audio files to download. Press M in the game to mute.
+let audioCtx = null;
+let soundOn = true;
+let wallSoundTimer = 0;
+
+function getAudio() {
+  if (!audioCtx) {
+    const AudioClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioClass) return null;
+    audioCtx = new AudioClass();
+  }
+  if (audioCtx.state === "suspended") audioCtx.resume();
+  return audioCtx;
+}
+
+// One beep: pitch (Hz), length (seconds), wave shape, loudness, delay
+function beep(freq, duration, type, volume, delay) {
+  if (!soundOn) return;
+  const ac = getAudio();
+  if (!ac) return;
+  const start = ac.currentTime + (delay || 0);
+  const osc = ac.createOscillator();
+  const gain = ac.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, start);
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(volume, start + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+  osc.connect(gain);
+  gain.connect(ac.destination);
+  osc.start(start);
+  osc.stop(start + duration + 0.05);
+}
+
+// A quick burst of fading noise, for crashes
+function noiseBurst(volume) {
+  if (!soundOn) return;
+  const ac = getAudio();
+  if (!ac) return;
+  const length = Math.floor(ac.sampleRate * 0.25);
+  const buffer = ac.createBuffer(1, length, ac.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < length; i++) {
+    data[i] = (Math.random() * 2 - 1) * (1 - i / length);
+  }
+  const source = ac.createBufferSource();
+  source.buffer = buffer;
+  const gain = ac.createGain();
+  gain.gain.value = volume;
+  source.connect(gain);
+  gain.connect(ac.destination);
+  source.start();
+}
+
+const SOUNDS = {
+  tick: () => beep(440, 0.15, "square", 0.12, 0),
+  go: () => beep(880, 0.45, "square", 0.14, 0),
+  brick: () => {
+    noiseBurst(0.35);
+    beep(120, 0.18, "sawtooth", 0.2, 0);
+  },
+  bump: () => beep(90, 0.12, "sine", 0.25, 0),
+  lap: () => {
+    beep(660, 0.12, "triangle", 0.2, 0);
+    beep(990, 0.25, "triangle", 0.2, 0.12);
+  },
+  finish: () => {
+    [523, 659, 784].forEach((f, i) => beep(f, 0.25, "triangle", 0.2, i * 0.15));
+    beep(1047, 0.7, "triangle", 0.2, 0.45);
+  }
+};
+
+// ---- Car select ----
+// Each car has colors, a shape, and a little personality. Bentley can add
+// or change cars here! speed and turn are multipliers (1 = normal).
+const CARS = [
+  {
+    name: "Green Racer",
+    description: "Fast and sleek",
+    body: "#8cd10f",
+    roof: "#c9f35b",
+    dark: "#3d5f06",
+    suit: "#d01012",
+    cap: "#1a1a1a",
+    length: 52,
+    width: 26,
+    wheelLength: 14,
+    wheelWidth: 8,
+    roofLength: 24,
+    roofCenter: -2,
+    studCols: 3,
+    studRows: 2,
+    windshieldLength: 7,
+    speed: 1.0,
+    turn: 1.0
+  },
+  {
+    name: "Blue Buggy",
+    description: "Easy to steer",
+    body: "#1c6fd1",
+    roof: "#ffd400",
+    dark: "#0c3a75",
+    suit: "#ff7f1e",
+    cap: "#5a3a1a",
+    length: 44,
+    width: 32,
+    wheelLength: 16,
+    wheelWidth: 10,
+    roofLength: 18,
+    roofCenter: -4,
+    studCols: 2,
+    studRows: 2,
+    windshieldLength: 6,
+    speed: 0.92,
+    turn: 1.2
+  }
+];
+
+// Go to the track select screen
+function openTrackSelect() {
+  resetRace();
+  race.state = "trackSelect";
+}
+
+// A little picture of a track, drawn to fit inside a box
+function drawTrackPreview(track, cx, cy, boxW, boxH) {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  track.points.forEach((p) => {
+    minX = Math.min(minX, p.x);
+    maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y);
+    maxY = Math.max(maxY, p.y);
+  });
+  const scale = Math.min(
+    boxW / (maxX - minX + track.width),
+    boxH / (maxY - minY + track.width));
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(scale, scale);
+  ctx.translate(-(minX + maxX) / 2, -(minY + maxY) / 2);
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  track.points.forEach((p, i) => {
+    if (i === 0) ctx.moveTo(p.x, p.y);
+    else ctx.lineTo(p.x, p.y);
+  });
+  ctx.closePath();
+  ctx.lineWidth = track.width + 24;
+  ctx.strokeStyle = THEME.curbA;
+  ctx.stroke();
+  ctx.lineWidth = track.width;
+  ctx.strokeStyle = THEME.road;
+  ctx.stroke();
+  // A yellow dot shows where the start line is
+  const s = track.points[track.startIndex];
+  ctx.fillStyle = THEME.hudBar;
+  ctx.beginPath();
+  ctx.arc(s.x, s.y, track.width * 0.32, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawTrackSelect() {
+  ctx.fillStyle = "rgba(0, 0, 0, 0.62)";
+  ctx.fillRect(0, 0, W, H);
+  bigText("Pick your track", 85, 54);
+
+  TRACKS.forEach((track, i) => {
+    const cx = W / 2 + (i - (TRACKS.length - 1) / 2) * 300;
+    const cy = H / 2 - 5;
+    const picked = i === trackChoice;
+
+    rect(cx - 140, cy - 150, 280, 310,
+      picked ? "rgba(255, 255, 255, 0.22)" : "rgba(255, 255, 255, 0.08)", 18);
+    if (picked) {
+      ctx.strokeStyle = THEME.hudBar;
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(cx - 140, cy - 150, 280, 310, 18);
+      else ctx.rect(cx - 140, cy - 150, 280, 310);
+      ctx.stroke();
+    }
+
+    drawTrackPreview(track, cx, cy - 65, 240, 150);
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = THEME.hudText;
+    ctx.font = "bold 28px 'Trebuchet MS', 'Segoe UI', sans-serif";
+    ctx.fillText(track.name, cx, cy + 105);
+    ctx.font = "16px 'Trebuchet MS', 'Segoe UI', sans-serif";
+    ctx.fillText(track.description, cx, cy + 135);
+  });
+
+  bigText("\u2190 \u2192 to choose, Space to pick", H - 55, 28);
+}
+
+// Go back to the car select screen
+function openCarSelect() {
+  resetRace();
+  race.state = "select";
+}
+
+function drawCarSelect() {
+  ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+  ctx.fillRect(0, 0, W, H);
+  bigText("Pick your car", 95, 54);
+
+  CARS.forEach((style, i) => {
+    const cx = W / 2 + (i - (CARS.length - 1) / 2) * 340;
+    const cy = H / 2 - 5;
+    const picked = i === car.choice;
+
+    rect(cx - 140, cy - 110, 280, 260,
+      picked ? "rgba(255, 255, 255, 0.22)" : "rgba(255, 255, 255, 0.08)", 18);
+    if (picked) {
+      ctx.strokeStyle = THEME.hudBar;
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(cx - 140, cy - 110, 280, 260, 18);
+      else ctx.rect(cx - 140, cy - 110, 280, 260);
+      ctx.stroke();
+    }
+
+    // The chosen car wiggles a little
+    const wiggle = picked ? Math.sin(performance.now() / 400) * 0.12 : 0;
+    drawCarAt(cx, cy - 15, wiggle, style, 2.6);
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = THEME.hudText;
+    ctx.font = "bold 28px 'Trebuchet MS', 'Segoe UI', sans-serif";
+    ctx.fillText(style.name, cx, cy + 90);
+    ctx.font = "18px 'Trebuchet MS', 'Segoe UI', sans-serif";
+    ctx.fillText(style.description, cx, cy + 120);
+  });
+
+  bigText("← → to choose, Space to pick", H - 70, 28);
+}
+
+function startCountdown() {
+  race.lastTick = 3;
+  SOUNDS.tick();
+  race.state = "countdown";
+  race.countdown = 3;
+}
+
+function updateRace(dt) {
+  const { along, across } = finishOffsets();
+  const onLine = Math.abs(across) <= TRACK.width / 2 + CONFIG.curbForgiveness;
+
+  if (race.state === "countdown") {
+    race.countdown -= dt;
+    const number = Math.ceil(race.countdown);
+    if (number > 0 && number < race.lastTick) {
+      race.lastTick = number;
+      SOUNDS.tick();
+    }
+    if (race.countdown <= 0) {
+      SOUNDS.go();
+      race.state = "racing";
+      race.time = 0;
+      race.lapStart = 0;
+      race.goFlash = 0.8;
+    }
+  } else if (race.state === "racing") {
+    race.time += dt;
+
+    // Pass the checkpoints in order
+    if (race.nextCheckpoint < CHECKPOINTS.length) {
+      const cp = TRACK.points[CHECKPOINTS[race.nextCheckpoint]];
+      if (Math.hypot(car.x - cp.x, car.y - cp.y) < CONFIG.checkpointRadius) {
+        race.nextCheckpoint++;
+      }
+    }
+
+    // Crossing the finish line forward after every checkpoint = a lap!
+    const crossedForward = race.prevAlong < 0 && along >= 0 && onLine;
+    if (crossedForward && race.nextCheckpoint >= CHECKPOINTS.length) {
+      race.lapTimes.push(race.time - race.lapStart);
+      race.lapStart = race.time;
+      race.nextCheckpoint = 0;
+      if (race.lapTimes.length >= CONFIG.totalLaps) {
+        race.state = "finished";
+        race.finishChoice = 0;
+        SOUNDS.finish();
+      } else {
+        SOUNDS.lap();
+      }
+    } else if (crossedForward && race.crossedStart) {
+      race.missedFlash = 2.5; // went around without passing every checkpoint
+    }
+    if (crossedForward) race.crossedStart = true;
+  }
+
+  if (race.goFlash > 0) race.goFlash -= dt;
+  if (race.missedFlash > 0) race.missedFlash -= dt;
+  race.prevAlong = along;
+}
+
+// 83.4 seconds becomes 1:23.40
+function formatTime(t) {
+  const minutes = Math.floor(t / 60);
+  const seconds = t - minutes * 60;
+  return minutes + ":" + seconds.toFixed(2).padStart(5, "0");
+}
+
+// Big centered text with a soft shadow
+function bigText(text, y, size) {
+  ctx.textAlign = "center";
+  ctx.font = "bold " + size + "px 'Trebuchet MS', 'Segoe UI', sans-serif";
+  ctx.fillStyle = "rgba(0, 0, 0, 0.4)";
+  ctx.fillText(text, W / 2 + 3, y + 3);
+  ctx.fillStyle = THEME.hudText;
+  ctx.fillText(text, W / 2, y);
+}
+
+function drawRaceHud() {
+  // Lap and timer, top left
+  const lapNumber = Math.min(race.lapTimes.length + 1, CONFIG.totalLaps);
+  ctx.textAlign = "left";
+  ctx.font = "bold 24px 'Trebuchet MS', 'Segoe UI', sans-serif";
+  ctx.fillStyle = THEME.hudText;
+  ctx.fillText("Lap " + lapNumber + "/" + CONFIG.totalLaps, 20, 36);
+  ctx.fillText(formatTime(race.time), 20, 66);
+
+  // Sound on/off reminder, bottom right
+  ctx.textAlign = "right";
+  ctx.font = "bold 16px 'Trebuchet MS', 'Segoe UI', sans-serif";
+  ctx.fillStyle = THEME.hudText;
+  ctx.fillText(soundOn ? "Sound on (M)" : "Sound off (M)", W - 20, H - 20);
+
+  // Lap times, top right
+  if (race.lapTimes.length > 0) {
+    ctx.textAlign = "right";
+    ctx.font = "bold 18px 'Trebuchet MS', 'Segoe UI', sans-serif";
+    ctx.fillText("Last lap " + formatTime(race.lapTimes[race.lapTimes.length - 1]), W - 20, 36);
+    ctx.fillText("Best lap " + formatTime(Math.min(...race.lapTimes)), W - 20, 60);
+  }
+
+  if (race.missedFlash > 0 && race.state === "racing") {
+    bigText("That lap didn’t count. Follow the whole track!", H / 2 + 30, 28);
+  }
+
+  if (race.state === "ready") {
+    bigText(TRACK.name, H / 2 - 55, 30);
+    bigText("Press Space to start", H / 2 - 5, 42);
+    bigText("Arrow keys or WASD to drive. R puts the car back.", H / 2 + 32, 20);
+    bigText("C changes your car. T changes the track.", H / 2 + 58, 20);
+  } else if (race.state === "countdown") {
+    bigText(String(Math.ceil(race.countdown)), H / 2 + 35, 120);
+  } else if (race.state === "racing" && race.goFlash > 0) {
+    bigText("GO!", H / 2 + 35, 110);
+  } else if (race.state === "finished") {
+    const lapsY = H / 2 - 8;
+    const lastLapY = lapsY + (race.lapTimes.length - 1) * 28;
+    const menuY = lastLapY + 46;
+    const hintY = menuY + 80 + 38;
+    const panelTop = H / 2 - 150;
+    rect(W / 2 - 250, panelTop, 500, hintY + 22 - panelTop, "rgba(0, 0, 0, 0.55)", 16);
+    bigText("Race complete!", H / 2 - 95, 50);
+    bigText("Total time " + formatTime(race.time), H / 2 - 50, 34);
+    race.lapTimes.forEach((t, i) => {
+      bigText("Lap " + (i + 1) + "   " + formatTime(t), lapsY + i * 28, 22);
+    });
+    // The menu: the chosen option gets a yellow pill around it
+    ["Race again", "Try another car", "Try another track"].forEach((label, i) => {
+      const rowY = menuY + i * 40;
+      if (i === race.finishChoice) {
+        rect(W / 2 - 160, rowY - 29, 320, 40, "rgba(255, 225, 77, 0.3)", 20);
+        ctx.strokeStyle = THEME.hudBar;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+      }
+      bigText(label, rowY, 28);
+    });
+    bigText("↑ ↓ to choose, Space to pick", hintY, 18);
+  }
+}
+
+openTrackSelect();
+
+// Keyboard
+const keys = new Set();
+let hasDriven = false;
+const GAME_KEYS = [
+  "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+  "KeyW", "KeyA", "KeyS", "KeyD"
+];
+window.addEventListener("keydown", (e) => {
+  getAudio(); // browsers only allow sound after a key press
+  if (e.code === "KeyM") soundOn = !soundOn;
+  if (GAME_KEYS.includes(e.code)) {
+    e.preventDefault();
+    keys.add(e.code);
+    hasDriven = true;
+  }
+  // Space or Enter: pick a track or car, start a race, or use the finish menu.
+  // R puts the car back on the start line. C changes the car. T changes the track.
+  if (e.code === "Space" || e.code === "Enter") {
+    e.preventDefault();
+    if (race.state === "trackSelect") {
+      loadTrack(trackChoice);
+      openCarSelect();
+    } else if (race.state === "select") {
+      resetRace();
+    } else if (race.state === "ready") {
+      startCountdown();
+    } else if (race.state === "finished") {
+      if (race.finishChoice === 0) {
+        resetRace();
+        startCountdown();
+      } else if (race.finishChoice === 1) {
+        openCarSelect();
+      } else {
+        openTrackSelect();
+      }
+    }
+  }
+  // On the finish menu, up and down move between the three options
+  if (race.state === "finished" && !e.repeat) {
+    const up = e.code === "ArrowUp" || e.code === "KeyW";
+    const down = e.code === "ArrowDown" || e.code === "KeyS";
+    if (up || down) {
+      race.finishChoice = (race.finishChoice + (down ? 1 : 2)) % 3;
+      SOUNDS.tick();
+    }
+  }
+  if (race.state === "trackSelect") {
+    if (e.code === "ArrowLeft" || e.code === "KeyA") {
+      trackChoice = (trackChoice + TRACKS.length - 1) % TRACKS.length;
+      SOUNDS.tick();
+    }
+    if (e.code === "ArrowRight" || e.code === "KeyD") {
+      trackChoice = (trackChoice + 1) % TRACKS.length;
+      SOUNDS.tick();
+    }
+  }
+  if (race.state === "select") {
+    if (e.code === "ArrowLeft" || e.code === "KeyA") {
+      car.choice = (car.choice + CARS.length - 1) % CARS.length;
+      SOUNDS.tick();
+    }
+    if (e.code === "ArrowRight" || e.code === "KeyD") {
+      car.choice = (car.choice + 1) % CARS.length;
+      SOUNDS.tick();
+    }
+  }
+  const idle = race.state !== "racing" && race.state !== "countdown";
+  if (e.code === "KeyR" && race.state !== "select" && race.state !== "trackSelect") resetRace();
+  if (e.code === "KeyC" && idle && race.state !== "trackSelect") openCarSelect();
+  if (e.code === "KeyT" && idle) openTrackSelect();
+});
+window.addEventListener("keyup", (e) => {
+  keys.delete(e.code);
+});
+window.addEventListener("blur", () => keys.clear());
+
+function moveToward(value, target, amount) {
+  if (value < target) return Math.min(value + amount, target);
+  return Math.max(value - amount, target);
+}
+
+function update(dt) {
+  const canDrive = race.state === "racing"; // no driving during the countdown
+  const gas = canDrive && (keys.has("ArrowUp") || keys.has("KeyW"));
+  const brake = canDrive && (keys.has("ArrowDown") || keys.has("KeyS"));
+  const left = canDrive && (keys.has("ArrowLeft") || keys.has("KeyA"));
+  const right = canDrive && (keys.has("ArrowRight") || keys.has("KeyD"));
+
+  // Speed
+  if (gas && !brake) {
+    car.speed += CONFIG.accel * dt;
+  } else if (brake && !gas) {
+    if (car.speed > 0) car.speed -= CONFIG.brakePower * dt;
+    else car.speed -= CONFIG.reverseAccel * dt;
+  } else {
+    car.speed = moveToward(car.speed, 0, CONFIG.coastDrag * dt);
+  }
+  car.speed = Math.max(-CONFIG.reverseSpeed, Math.min(CONFIG.maxSpeed * CARS[car.choice].speed, car.speed));
+
+  // The grass slows you down (gently)
+  const edge = TRACK.width / 2 + CONFIG.curbForgiveness;
+  car.onTrack = distanceToTrack(car.x, car.y) <= edge;
+  if (!car.onTrack && car.speed > CONFIG.offTrackMaxSpeed) {
+    car.speed = moveToward(car.speed, CONFIG.offTrackMaxSpeed, CONFIG.offTrackDrag * dt);
+  }
+
+  // Steering: the slower you go, the less you turn
+  const steer = (right ? 1 : 0) - (left ? 1 : 0);
+  const grip = Math.min(1, Math.abs(car.speed) / CONFIG.gripSpeed);
+  const direction = car.speed >= 0 ? 1 : -1;
+  car.angle += steer * CONFIG.turnRate * CARS[car.choice].turn * grip * direction * dt;
+
+  // Move
+  car.x += Math.cos(car.angle) * car.speed * dt;
+  car.y += Math.sin(car.angle) * car.speed * dt;
+
+  // Gentle bounce off the edges of the baseplate
+  const m = CONFIG.wallMargin;
+  let bumped = false;
+  if (car.x < m) { car.x = m; bumped = true; }
+  if (car.x > W - m) { car.x = W - m; bumped = true; }
+  if (car.y < m) { car.y = m; bumped = true; }
+  if (car.y > H - m) { car.y = H - m; bumped = true; }
+  if (bumped) {
+    if (Math.abs(car.speed) > 50 && wallSoundTimer <= 0) {
+      SOUNDS.bump();
+      wallSoundTimer = 0.3;
+    }
+    car.speed *= CONFIG.wallBounce;
+  }
+  wallSoundTimer -= dt;
+
+  updateRace(dt);
+  updateBricks(dt);
+}
+
+function rect(x, y, w, h, color, radius) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, w, h, radius || 0);
+  else ctx.rect(x, y, w, h);
+  ctx.fill();
+}
+
+// Make a hex color lighter (amount > 0) or darker (amount < 0)
+function shade(hex, amount) {
+  const n = parseInt(hex.slice(1), 16);
+  const target = amount < 0 ? 0 : 255;
+  const mix = Math.abs(amount);
+  const r = Math.round(((n >> 16) & 255) * (1 - mix) + target * mix);
+  const g = Math.round(((n >> 8) & 255) * (1 - mix) + target * mix);
+  const b = Math.round((n & 255) * (1 - mix) + target * mix);
+  return "rgb(" + r + ", " + g + ", " + b + ")";
+}
+
+function drawCar() {
+  drawCarAt(car.x, car.y, car.angle, CARS[car.choice], 1);
+}
+
+// Draws any car style, at any spot, angle and size.
+// The car is built in layers, like real bricks: each layer sits a little
+// higher with a dark side showing underneath, and the light always comes
+// from the top left of the screen, even when the car turns.
+function drawCarAt(x, y, angle, style, scale) {
+  const L = style.length;
+  const Wd = style.width;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.scale(scale, scale);
+
+  // Which way is "away from the light" from the car's point of view?
+  const ox = Math.cos(angle) * 0.62 + Math.sin(angle) * 0.78;
+  const oy = -Math.sin(angle) * 0.62 + Math.cos(angle) * 0.78;
+  // Things that sit higher are drawn a little toward the light
+  const lift = (z) => [-ox * z * 0.6, -oy * z * 0.6];
+
+  // A flat brick piece: dark sides underneath and a lit top face
+  const block = (bx, by, bw, bh, color, radius, z0, depth) => {
+    const side = shade(color, -0.4);
+    for (let k = 0; k < depth; k++) {
+      const [sx, sy] = lift(z0 + k);
+      rect(bx + sx, by + sy, bw, bh, side, radius);
+    }
+    const [tx, ty] = lift(z0 + depth);
+    const span = (Math.abs(ox) * bw + Math.abs(oy) * bh) / 2;
+    const cx = bx + tx + bw / 2;
+    const cy = by + ty + bh / 2;
+    const grad = ctx.createLinearGradient(
+      cx - ox * span, cy - oy * span, cx + ox * span, cy + oy * span);
+    grad.addColorStop(0, shade(color, 0.3));
+    grad.addColorStop(1, shade(color, -0.12));
+    rect(bx + tx, by + ty, bw, bh, grad, radius);
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.3)";
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+  };
+
+  // A round piece (a stud or a head): dark side, lit top, shiny spot
+  const cylinder = (cx, cy, r, color, z0, depth) => {
+    const side = shade(color, -0.4);
+    for (let k = 0; k < depth; k++) {
+      const [sx, sy] = lift(z0 + k);
+      ctx.fillStyle = side;
+      ctx.beginPath();
+      ctx.arc(cx + sx, cy + sy, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    const [tx, ty] = lift(z0 + depth);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(cx + tx, cy + ty, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.25)";
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+    ctx.fillStyle = "rgba(255, 255, 255, 0.55)";
+    ctx.beginPath();
+    ctx.arc(cx + tx - ox * r * 0.35, cy + ty - oy * r * 0.35, r * 0.3, 0, Math.PI * 2);
+    ctx.fill();
+  };
+
+  // Shadow on the ground
+  ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
+  ctx.beginPath();
+  ctx.ellipse(ox * 4, oy * 4, L * 0.58, Wd * 0.7, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Where the roof and windshield sit along the car
+  const roofStart = style.roofCenter - style.roofLength / 2;
+  const roofEnd = style.roofCenter + style.roofLength / 2;
+  const windStart = roofEnd + 2;
+  const windEnd = windStart + style.windshieldLength;
+
+  // Wheels (black tires with a gray stripe)
+  const wheelX = L * 0.29;
+  const wheelY = Wd * 0.58;
+  const wheelSpots = [[-wheelX, -wheelY], [wheelX, -wheelY], [-wheelX, wheelY], [wheelX, wheelY]];
+  wheelSpots.forEach(([wx, wy]) => {
+    block(wx - style.wheelLength / 2, wy - style.wheelWidth / 2,
+      style.wheelLength, style.wheelWidth, THEME.carWheel, 3, 0, 3);
+    const [tx, ty] = lift(3);
+    rect(wx - style.wheelLength * 0.3 + tx, wy - 1 + ty, style.wheelLength * 0.6, 2, "#6b7078", 1);
+  });
+
+  // Body: the big brick
+  block(-L / 2, -Wd / 2, L, Wd, style.body, 4, 0, 4);
+
+  // Seams between the bricks (laid like a brick wall)
+  const [seamX, seamY] = lift(4);
+  ctx.save();
+  ctx.translate(seamX, seamY);
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.28)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(-L / 2, 0);
+  ctx.lineTo(L / 2, 0);
+  for (let sx = -L / 2 + 16; sx < L / 2 - 2; sx += 16) {
+    ctx.moveTo(sx, -Wd / 2);
+    ctx.lineTo(sx, 0);
+  }
+  for (let sx = -L / 2 + 8; sx < L / 2 - 2; sx += 16) {
+    ctx.moveTo(sx, 0);
+    ctx.lineTo(sx, Wd / 2);
+  }
+  ctx.stroke();
+  ctx.restore();
+
+  // Studs on the back and the hood
+  const bodyRows = Math.floor((Wd - 2) / 8);
+  [(-L / 2 + roofStart) / 2, (windEnd + L / 2) / 2 - 1].forEach((sx) => {
+    for (let row = 0; row < bodyRows; row++) {
+      cylinder(sx, (row - (bodyRows - 1) / 2) * 8, 3, style.body, 4, 2);
+    }
+  });
+
+  // Cockpit: a raised brick in a second color
+  const roofY = -Wd / 2 + 3;
+  const roofH = Wd - 6;
+  block(roofStart, roofY, style.roofLength, roofH, style.roof, 3, 4, 2);
+
+  // The minifigure driver sits in the cockpit
+  const seatX = style.roofCenter - 3;
+  block(seatX - 3.5, -8.5, 7, 17, style.suit, 3, 6, 2);
+
+  // Steering wheel
+  const [wheelLx, wheelLy] = lift(7);
+  ctx.strokeStyle = "#222222";
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  ctx.arc(style.roofCenter + 6 + wheelLx, wheelLy, 4.3, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Arms and yellow hands reaching for the wheel
+  const [armX, armY] = lift(8.5);
+  ctx.strokeStyle = style.suit;
+  ctx.lineWidth = 3;
+  ctx.lineCap = "round";
+  [-1, 1].forEach((side) => {
+    ctx.beginPath();
+    ctx.moveTo(seatX + 1 + armX, side * 7.2 + armY);
+    ctx.lineTo(style.roofCenter + 4.5 + armX, side * 3.6 + armY);
+    ctx.stroke();
+  });
+  ctx.lineCap = "butt";
+  ctx.fillStyle = "#ffd400";
+  [-1, 1].forEach((side) => {
+    ctx.beginPath();
+    ctx.arc(style.roofCenter + 4.5 + armX, side * 3.6 + armY, 1.8, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // Yellow head with a cap on the back half
+  cylinder(seatX, 0, 4.4, "#ffd400", 8, 3);
+  const [capX, capY] = lift(11);
+  ctx.fillStyle = style.cap;
+  ctx.beginPath();
+  ctx.arc(seatX + capX, capY, 4.4, Math.PI / 2, Math.PI * 1.5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.3)";
+  ctx.lineWidth = 0.8;
+  ctx.stroke();
+
+  // Windshield: a clear piece with a shiny streak
+  block(windStart, -Wd / 2 + 4, style.windshieldLength, Wd - 8, THEME.carWindow, 2, 4, 3);
+  const [glassX, glassY] = lift(7);
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.8)";
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(windStart + 1.5 + glassX, -Wd / 2 + 6 + glassY);
+  ctx.lineTo(windStart + style.windshieldLength - 1.5 + glassX, -Wd / 2 + 10 + glassY);
+  ctx.stroke();
+
+  // Round yellow headlights in front, red taillight pieces in back
+  [-1, 1].forEach((side) => {
+    const lampY = side * (Wd / 2 - 4.5);
+    cylinder(L / 2 + 0.5, lampY, 2.3, THEME.carLight, 0, 2);
+    block(-L / 2 - 1, lampY - 2.5, 3, 5, "#d01012", 1, 0, 2);
+  });
+
+  ctx.restore();
+}
+
+function drawHud() {
+  // Speed bar, bottom left
+  const barW = 160;
+  const barH = 14;
+  const x = 20;
+  const y = H - 36;
+  const fraction = Math.max(0, car.speed) / (CONFIG.maxSpeed * CARS[car.choice].speed);
+  rect(x, y, barW, barH, THEME.hudBarBack, 7);
+  if (fraction > 0.02) rect(x, y, barW * fraction, barH, THEME.hudBar, 7);
+  ctx.fillStyle = THEME.hudText;
+  ctx.font = "bold 14px 'Trebuchet MS', 'Segoe UI', sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText("Speed", x, y - 8);
+
+  // Friendly nudge when you leave the road
+  if (!car.onTrack) {
+    ctx.textAlign = "center";
+    ctx.font = "bold 22px 'Trebuchet MS', 'Segoe UI', sans-serif";
+    ctx.fillStyle = THEME.hudText;
+    ctx.fillText("On the grass: slow going!", W / 2, 36);
+  }
+
+  drawRaceHud();
+}
+
+function draw() {
+  ctx.drawImage(baseplate, 0, 0);
+  if (race.state === "trackSelect") {
+    drawTrackSelect();
+    return;
+  }
+  if (race.state === "select") {
+    drawCarSelect();
+    return;
+  }
+  drawBricks();
+  drawCar();
+  drawDebris();
+  drawHud();
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
